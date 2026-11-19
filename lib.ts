@@ -11,6 +11,8 @@ export type PendingEntry = {
 export type RoomPolicy = {
   requireMention: boolean
   allowFrom: string[]
+  // buttons: deliver the allowed sender's emoji reactions, and the text of the message a reply answers
+  buttons?: boolean
 }
 
 export type Access = {

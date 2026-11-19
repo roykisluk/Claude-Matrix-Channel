@@ -1157,6 +1157,13 @@ matrixClient.on('room.message', async (roomId: string, event: Record<string, unk
     const messageBody = body || (atts.length > 0 ? '(attachment)' : '')
     const ts = new Date(originTs).toISOString()
 
+    // buttons rooms: say which message a reply answers (modern clients send no quoted fallback)
+    let inReplyTo: string | undefined
+    const replyId = (content['m.relates_to'] as { 'm.in_reply_to'?: { event_id?: string } } | undefined)?.[
+      'm.in_reply_to'
+    ]?.event_id
+    if (replyId && access.rooms[roomId]?.buttons) inReplyTo = await eventText(roomId, replyId)
+
     mcp
       .notification({
         method: 'notifications/claude/channel',
@@ -1168,6 +1175,7 @@ matrixClient.on('room.message', async (roomId: string, event: Record<string, unk
             user: sender,
             ts,
             ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+            ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
           },
         },
       })
@@ -1176,6 +1184,48 @@ matrixClient.on('room.message', async (roomId: string, event: Record<string, unk
       })
   } catch (err) {
     process.stderr.write(`matrix channel: handleInbound failed: ${err}\n`)
+  }
+})
+
+// Text of an earlier message (for reply context and reactions), trimmed; '' if it cannot be fetched.
+async function eventText(roomId: string, eventId: string): Promise<string> {
+  try {
+    const ev = (await matrixClient.getEvent(roomId, eventId)) as { content?: { body?: string } }
+    return (ev.content?.body ?? '').slice(0, 600)
+  } catch {
+    return ''
+  }
+}
+
+// buttons rooms: an allowed sender's reaction is delivered as a message naming the emoji and the message it is on.
+matrixClient.on('room.event', async (roomId: string, event: Record<string, unknown>) => {
+  if (event.type !== 'm.reaction') return
+  try {
+    const sender = event.sender as string
+    const originTs = event.origin_server_ts as number
+    if (sender === botUserId || originTs < startupTimestamp) return
+    const policy = loadAccess().rooms[roomId]
+    if (!policy?.buttons || !(policy.allowFrom ?? []).includes(sender)) return
+    const rel = (event.content as { 'm.relates_to'?: { event_id?: string; key?: string } })?.['m.relates_to']
+    if (!rel?.event_id || !rel.key) return
+    lastActiveRoom = roomId
+    mcp
+      .notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: `[reaction ${rel.key}] on: ${await eventText(roomId, rel.event_id)}`,
+          meta: {
+            room_id: roomId,
+            event_id: rel.event_id,
+            user: sender,
+            ts: new Date(originTs).toISOString(),
+            reaction: rel.key,
+          },
+        },
+      })
+      .catch((err) => process.stderr.write(`matrix channel: failed to deliver reaction: ${err}\n`))
+  } catch (err) {
+    process.stderr.write(`matrix channel: reaction handler failed: ${err}\n`)
   }
 })
 
